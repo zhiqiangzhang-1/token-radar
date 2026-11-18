@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="kicker">Token launch radar &middot; built from the DefiLlama snapshot</p>
+    <h1>Which pre-token protocol is worth farming next?</h1>
+    <p class="lede">200 protocols with no token on record, ranked by what a token would be worth if the
+    protocol kept its size &mdash; priced from the market&rsquo;s own multiples, not from a hunch.
+    Click any row for its farm plan.</p>
+    <p class="meta" id="meta">Loading&hellip;</p>
+  </div>
+</header>
+<main class="wrap" id="app" aria-busy="true"></main>
+<footer class="wrap foot">
+  <p>Implied value is a central estimate fitted from live-token protocols in the same snapshot; it
+  is not a prediction of any launch, price or airdrop. Nothing here promises a token or a return.
+  Read the model section below before acting on any row.</p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
