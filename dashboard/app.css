@@ -1,6 +1,12 @@
+/* Token Radar dashboard: one dark palette, five roles, one type ladder.
+   Roles: background #0b1120, surface #101a30, raised card #16213a, line #26355a,
+   ink #e8edf7, muted #9aa8c4, faint #6b7a99. Accent gold #f2b544 marks value;
+   teal #4ec9b0 marks links and early badges; green/red mark 7-day moves only.
+   Type ladder (ratio 1.25 from 15px body): 12 / 15 / 19 / 24 / 30 / 37.
+   Spacing in multiples of 8. No transitions, no nested cards, no side bars. */
 :root {
-  --bg: #0c1220;
-  --bg2: #111a2e;
+  --bg: #0b1120;
+  --bg2: #101a30;
   --card: #16213a;
   --line: #26355a;
   --ink: #e8edf7;
@@ -18,30 +24,30 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font: 15px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 a { color: var(--teal); }
-.wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
-.top { background: linear-gradient(180deg, #14203c, var(--bg)); border-bottom: 1px solid var(--line); padding: 34px 0 22px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+.top { background: linear-gradient(180deg, #14203c, var(--bg)); border-bottom: 1px solid var(--line); padding: 32px 0 24px; }
 .kicker { color: var(--gold); text-transform: uppercase; letter-spacing: .14em; font-size: 12px; margin: 0 0 8px; font-weight: 700; }
-h1 { font-size: 30px; line-height: 1.2; margin: 0 0 10px; }
-.lede { color: var(--muted); max-width: 760px; margin: 0 0 10px; }
-.meta { color: var(--faint); font-size: 13px; margin: 0; }
+h1 { font-size: 30px; line-height: 1.2; margin: 0 0 8px; }
+.lede { color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+.meta { color: var(--faint); font-size: 12px; margin: 0; }
 .controls {
-  display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: end;
   background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
-  padding: 14px; margin: 18px 0;
+  padding: 16px; margin: 16px 0;
 }
 .controls label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .controls select, .controls input[type="search"] {
   background: var(--card); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 6px; padding: 7px 9px; font-size: 14px; min-width: 130px;
+  border-radius: 6px; padding: 7px 9px; font-size: 16px; min-width: 130px;
 }
-.controls .check { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; color: var(--muted); font-size: 14px; }
-.count { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.controls .check { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; color: var(--muted); font-size: 15px; }
+.count { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
 .count b { color: var(--ink); }
 table { width: 100%; border-collapse: collapse; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+th, td { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
 thead th { background: var(--card); color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #182747; }
@@ -55,26 +61,27 @@ td .sub { display: block; color: var(--faint); font-size: 12px; }
   border-radius: 20px; padding: 1px 8px; font-size: 12px; margin-left: 6px; white-space: nowrap;
 }
 .badge.watch { color: var(--gold); }
-.detail { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 18px 0; }
-.detail h2 { margin: 0 0 4px; font-size: 24px; }
-.detail .facts { display: flex; flex-wrap: wrap; gap: 8px 26px; color: var(--muted); margin: 8px 0 14px; }
+.detail { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 24px; margin: 16px 0; }
+.detail h2 { margin: 0 0 8px; font-size: 24px; }
+.detail .facts { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); margin: 8px 0 16px; }
 .detail .facts b { color: var(--ink); }
-.big { font-size: 30px; color: var(--gold); font-weight: 800; margin: 6px 0 2px; }
-.big small { font-size: 14px; color: var(--muted); font-weight: 400; }
-.modelbox { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.detail h3 { font-size: 19px; margin: 24px 0 8px; }
+.big { font-size: 37px; line-height: 1.2; color: var(--gold); font-weight: 800; margin: 8px 0 0; }
+.big small { font-size: 15px; color: var(--muted); font-weight: 400; }
+.modelbox { border-top: 1px solid var(--line); padding: 16px 0 0; margin: 16px 0; }
 .modelbox table { background: none; border: 0; }
-.modelbox th, .modelbox td { border-bottom: 1px solid var(--line); padding: 6px 8px; }
-.steps { margin: 8px 0 0; padding-left: 22px; }
-.steps li { margin: 7px 0; }
-.steps .cost { color: var(--muted); font-size: 13px; }
-.back { display: inline-block; margin: 4px 0 12px; }
-h2.sec { font-size: 20px; margin: 30px 0 8px; }
-p.sec { color: var(--muted); margin: 0 0 12px; max-width: 800px; }
-.note { background: var(--card); border-left: 3px solid var(--gold); padding: 10px 14px; color: var(--muted); border-radius: 0 8px 8px 0; }
+.modelbox th, .modelbox td { border-bottom: 1px solid var(--line); padding: 8px; }
+.steps { margin: 8px 0 0; padding-left: 24px; }
+.steps li { margin: 8px 0; }
+.steps .cost { color: var(--muted); font-size: 12px; }
+.back { display: inline-block; margin: 4px 0 16px; }
+h2.sec { font-size: 19px; margin: 32px 0 8px; }
+p.sec { color: var(--muted); margin: 0 0 16px; max-width: 800px; }
+.note { border-top: 1px solid var(--line); padding: 16px 0 0; color: var(--muted); }
 .note b { color: var(--ink); }
-.foot { color: var(--faint); font-size: 13px; padding: 26px 20px 40px; }
-.empty { color: var(--muted); padding: 26px; text-align: center; }
+.foot { color: var(--faint); font-size: 12px; padding: 24px 16px 40px; }
+.empty { color: var(--muted); padding: 24px; text-align: center; }
 @media (max-width: 640px) {
-  h1 { font-size: 23px; }
+  h1 { font-size: 24px; }
   th.hide, td.hide { display: none; }
 }

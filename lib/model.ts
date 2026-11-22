@@ -1,24 +1,29 @@
 // The token radar's model: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds the
-// pre-token protocols below the floor with the most TVL: the early rows the radar exists to find. A
+// pre-token protocols below the watchlist floor with the most TVL: the early rows the radar exists to find. A
 // protocol is pre-token when its DefiLlama record carries no token (no market cap, no CoinGecko id,
 // no symbol). Live-token protocols are kept apart and shown as the market's own values, never mixed
 // into the ranked board.
 //
 // Implied value is fitted from the snapshot itself at run time, never from a hardcoded list of
-// names, in three steps:
+// names, in three steps (model radar-3, a hybrid of category multiples and the global curve):
 //
 //   1. Size curve. Across the snapshot's live-token protocols (those with a market cap and a TVL),
 //      log(market cap) is regressed on log(TVL) by ordinary least squares. The fit on this
 //      snapshot is log(mcap) = 6.96 + 0.52 * log(tvl) over 128 protocols: the market pays a
 //      multiple of TVL that falls as TVL grows (about 0.67x at $5M of TVL, 0.22x at $50M, 0.05x
-//      at $1B). A pre-token protocol's base value is the curve's prediction at its own TVL.
-//   2. Category factor. For each category with at least three live-token peers, the median
-//      log-residual of those peers against the curve is shrunk by n/(n+3) toward zero and
-//      exponentiated, clamped to [0.5, 2.0]. Categories with fewer than three peers get no
-//      adjustment: one or two observations are not evidence. Lending peers sit below the curve
-//      (factor 0.63), RWA and bridges above it (1.38 and 1.36-2.00).
+//      at $1B). The curve gives the global multiple at any TVL.
+//   2. Category multiple, size-adjusted and blended. For each category with at least three
+//      live-token peers, the median mcap/TVL of those peers is moved to the protocol's own TVL
+//      along the curve's size slope, then blended with the global multiple in log space, the
+//      weight on the category being n/(n+4) so thin categories lean on the curve and thick ones
+//      speak for themselves. The blended multiple is kept within 0.15x-3.0x of the global one,
+//      so no thin category can run away with a row. Categories with fewer than three peers get
+//      the global multiple alone: one or two observations are not evidence. This replaces the
+//      radar-2 fit, whose category factor was clamped to [0.50, 2.00] and left liquid-staking
+//      rows priced about 4-7x above what their own peers trade at, while capping bridges at
+//      2.00x when their peers trade nearer 2.5x of the curve.
 //   3. Small, stated adjustments: 7-day TVL momentum, clamped to [-60, +120]%, at half weight;
 //      maturity 0.70 + 0.30 * min(age, 1095)/1095 (unknown listing date counts as 365 days);
 //      reach 1 + 0.03 * (min(chains, 5) - 1). Every adjustment is bounded, so no single input
@@ -59,12 +64,13 @@ export interface SizeCurve {
   residual_sd: number;
 }
 
-/** One category's adjustment from its live-token peers. */
-export interface CategoryFactor {
+/** One category's multiple from its live-token peers: median mcap/TVL and their median TVL. */
+export interface CategoryMultiple {
   category: string;
-  factor: number;
   peers: number;
-  median_residual: number;
+  median_multiple: number;
+  median_tvl_usd: number;
+  weight: number;
 }
 
 /** The model's structural choices: the only numbers not fitted from the snapshot. */
@@ -78,8 +84,9 @@ export interface ModelParams {
   unknown_age_days: number;
   chain_step: number;
   chain_cap: number;
-  factor_min: number;
-  factor_max: number;
+  blend_k: number;
+  ratio_min: number;
+  ratio_max: number;
   min_peers: number;
 }
 
@@ -93,16 +100,21 @@ export const PARAMS: ModelParams = {
   unknown_age_days: 365,
   chain_step: 0.03,
   chain_cap: 5,
-  factor_min: 0.5,
-  factor_max: 2.0,
+  blend_k: 4,
+  ratio_min: 0.15,
+  ratio_max: 3.0,
   min_peers: 3,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+/**
+ * How many pre-token protocols below the watchlist floor the early radar carries, by TVL.
+ * 186 is every rankable one the snapshot holds (40 watchlist + 186 = 226 rows); the 24 below-floor
+ * pre-token protocols left out are CEX rows and versioned pools, excluded on purpose.
+ */
+export const EARLY_ROWS = 186;
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -133,7 +145,12 @@ export interface BoardRow {
   model: {
     base_value: number;
     size_multiple: number;
+    global_multiple: number;
+    category_multiple: number | null;
     category_factor: number;
+    category_weight: number;
+    category_peers: number;
+    category_median_multiple: number | null;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -157,7 +174,12 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   size_multiple: number;
+  global_multiple: number;
+  category_multiple: number | null;
   category_factor: number;
+  category_weight: number;
+  category_peers: number;
+  category_median_multiple: number | null;
   growth_multiplier: number;
   maturity_multiplier: number;
   chains_multiplier: number;
@@ -184,7 +206,7 @@ export interface RadarData {
   model_version: string;
   params: ModelParams;
   curve: SizeCurve;
-  category_factors: CategoryFactor[];
+  category_multiples: CategoryMultiple[];
   watchlist_size: number;
   watchlist_slugs: string[];
   board_size: number;
@@ -255,43 +277,67 @@ export function fitSizeCurve(live: SnapshotProtocol[]): SizeCurve {
 }
 
 /**
- * Category factors from the same live peers: per category, the median log-residual against the
- * curve, shrunk by n/(n+3) toward zero, exponentiated and clamped. Categories with fewer than
- * PARAMS.min_peers peers get no factor (1.0): too little evidence to adjust.
+ * Category multiples from the same live peers: per category with at least PARAMS.min_peers peers,
+ * the median mcap/TVL and the peers' median TVL, with the blend weight n/(n+blend_k). Categories
+ * with fewer peers get no row: too little evidence to adjust. A median multiple is size-blind on
+ * its own, so the blend moves it to the protocol's TVL along the curve's slope (see multipleFor).
  */
-export function fitCategoryFactors(live: SnapshotProtocol[], curve: SizeCurve, params: ModelParams = PARAMS): CategoryFactor[] {
-  const byCat = new Map<string, number[]>();
+export function fitCategoryMultiples(live: SnapshotProtocol[], params: ModelParams = PARAMS): CategoryMultiple[] {
+  const byCat = new Map<string, SnapshotProtocol[]>();
   for (const p of live) {
-    const resid = Math.log(p.mcap_usd!) - (curve.intercept + curve.slope * Math.log(p.tvl_usd));
     const key = p.category ?? 'Uncategorized';
     const list = byCat.get(key);
-    if (list === undefined) byCat.set(key, [resid]);
-    else list.push(resid);
+    if (list === undefined) byCat.set(key, [p]);
+    else list.push(p);
   }
-  const out: CategoryFactor[] = [];
-  for (const [category, residuals] of [...byCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    if (residuals.length < params.min_peers) continue;
-    const med = median(residuals);
-    const shrunk = med * (residuals.length / (residuals.length + 3));
-    const factor = Math.min(params.factor_max, Math.max(params.factor_min, Math.exp(shrunk)));
-    out.push({ category, factor: Math.round(factor * 1000) / 1000, peers: residuals.length, median_residual: Math.round(med * 1000) / 1000 });
+  const out: CategoryMultiple[] = [];
+  for (const [category, peers] of [...byCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (peers.length < params.min_peers) continue;
+    const medMult = median(peers.map((p) => p.mcap_usd! / p.tvl_usd));
+    const medTvl = median(peers.map((p) => p.tvl_usd));
+    const weight = Math.round((peers.length / (peers.length + params.blend_k)) * 1000) / 1000;
+    out.push({ category, peers: peers.length, median_multiple: Math.round(medMult * 10000) / 10000, median_tvl_usd: Math.round(medTvl), weight });
   }
   return out;
+}
+
+/** One protocol's multiple under the hybrid: global, size-adjusted category, and the blend. */
+export interface ProtocolMultiple {
+  global: number;
+  category: number | null;
+  blended: number;
+  factor: number;
+  weight: number;
+  peers: number;
+  median_multiple: number | null;
 }
 
 /** The fitted model as one object, for the dashboard to state. */
 export interface FittedModel {
   curve: SizeCurve;
-  category_factors: CategoryFactor[];
-  factorOf: (category: string | null) => number;
+  category_multiples: CategoryMultiple[];
+  multipleFor: (protocol: SnapshotProtocol) => ProtocolMultiple;
 }
 
 export function fitModel(snapshot: Snapshot, params: ModelParams = PARAMS): FittedModel {
   const live = fittable(snapshot.protocols);
   const curve = fitSizeCurve(live);
-  const category_factors = fitCategoryFactors(live, curve, params);
-  const table = new Map(category_factors.map((f) => [f.category, f.factor]));
-  return { curve, category_factors, factorOf: (c) => table.get(c ?? 'Uncategorized') ?? 1 };
+  const category_multiples = fitCategoryMultiples(live, params);
+  const table = new Map(category_multiples.map((f) => [f.category, f]));
+  const multipleFor = (p: SnapshotProtocol): ProtocolMultiple => {
+    const global = Math.exp(curve.intercept) * Math.pow(p.tvl_usd, curve.slope - 1);
+    const entry = table.get(p.category ?? 'Uncategorized');
+    if (entry === undefined) {
+      return { global, category: null, blended: global, factor: 1, weight: 0, peers: 0, median_multiple: null };
+    }
+    // Move the category's median multiple to this protocol's size along the curve's slope:
+    // multiples fall as TVL grows, so a category median taken at $20M of TVL must not price a $376M protocol.
+    const sizeAdjusted = entry.median_multiple * Math.pow(p.tvl_usd / entry.median_tvl_usd, curve.slope - 1);
+    const blendedRaw = Math.exp(entry.weight * Math.log(sizeAdjusted) + (1 - entry.weight) * Math.log(global));
+    const ratio = Math.min(params.ratio_max, Math.max(params.ratio_min, blendedRaw / global));
+    return { global, category: sizeAdjusted, blended: global * ratio, factor: ratio, weight: entry.weight, peers: entry.peers, median_multiple: entry.median_multiple };
+  };
+  return { curve, category_multiples, multipleFor };
 }
 
 /** The multipliers and the implied value one protocol gets under the fitted model. */
@@ -300,19 +346,48 @@ export function impliedValue(
   asOf: string,
   model: FittedModel,
   params: ModelParams = PARAMS,
-): { implied: number; base: number; multiple: number; catFactor: number; growthPct: number; growthMult: number; maturityMult: number; chainsMult: number; age: number | null } {
+): {
+  implied: number;
+  base: number;
+  multiple: number;
+  globalMultiple: number;
+  categoryMultiple: number | null;
+  categoryFactor: number;
+  categoryWeight: number;
+  categoryPeers: number;
+  categoryMedianMultiple: number | null;
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  chainsMult: number;
+  age: number | null;
+} {
   const age = ageDays(asOf, protocol.listed_at);
-  const multiple = Math.exp(model.curve.intercept) * Math.pow(protocol.tvl_usd, model.curve.slope - 1);
-  const base = protocol.tvl_usd * multiple;
-  const catFactor = model.factorOf(protocol.category);
+  const m = model.multipleFor(protocol);
+  const base = protocol.tvl_usd * m.blended;
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(params.growth_cap, Math.max(params.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * params.growth_weight;
   const ageForModel = age ?? params.unknown_age_days;
   const maturityMult = params.maturity_floor + (Math.min(Math.max(ageForModel, 0), params.maturity_days) / params.maturity_days) * params.maturity_range;
   const chainsMult = 1 + params.chain_step * (Math.min(protocol.chains.length, params.chain_cap) - 1);
-  const implied = Math.max(1, Math.round(base * catFactor * growthMult * maturityMult * chainsMult));
-  return { implied, base: Math.round(base), multiple, catFactor, growthPct, growthMult, maturityMult, chainsMult, age };
+  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainsMult));
+  return {
+    implied,
+    base: Math.round(base),
+    multiple: m.blended,
+    globalMultiple: m.global,
+    categoryMultiple: m.category,
+    categoryFactor: m.factor,
+    categoryWeight: m.weight,
+    categoryPeers: m.peers,
+    categoryMedianMultiple: m.median_multiple,
+    growthPct,
+    growthMult,
+    maturityMult,
+    chainsMult,
+    age,
+  };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -371,7 +446,12 @@ export function buildBoard(snapshot: Snapshot, model: FittedModel, params: Model
     model: {
       base_value: s.v.base,
       size_multiple: round4(s.v.multiple),
-      category_factor: s.v.catFactor,
+      global_multiple: round4(s.v.globalMultiple),
+      category_multiple: s.v.categoryMultiple === null ? null : round4(s.v.categoryMultiple),
+      category_factor: round4(s.v.categoryFactor),
+      category_weight: s.v.categoryWeight,
+      category_peers: s.v.categoryPeers,
+      category_median_multiple: s.v.categoryMedianMultiple,
       growth_pct: round4(s.v.growthPct),
       growth_multiplier: round4(s.v.growthMult),
       maturity_multiplier: round4(s.v.maturityMult),
@@ -397,6 +477,32 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
+/** The gas token of a chain, for the fee note in the first step; unknown chains stay generic. */
+function gasToken(chain: string): string {
+  // A full phrase, so the sentence reads with or without a known ticker: "keep a little ETH
+  // in the wallet for fees" or "keep enough of the chain's native gas token in the wallet".
+  const map: Record<string, string> = {
+    Ethereum: 'a little ETH', Arbitrum: 'a little ETH', Optimism: 'a little ETH', Base: 'a little ETH',
+    Ink: 'a little ETH', Linea: 'a little ETH', 'zkSync Era': 'a little ETH', Scroll: 'a little ETH',
+    Blast: 'a little ETH', Mode: 'a little ETH', Fraxtal: 'a little ETH', Manta: 'a little ETH',
+    Zora: 'a little ETH', 'World Chain': 'a little ETH', Unichain: 'a little ETH', Gnosis: 'a little xDAI',
+    Polygon: 'a little POL', Solana: 'a little SOL', Binance: 'a little BNB', opBNB: 'a little BNB',
+    Avalanche: 'a little AVAX', Sui: 'a little SUI', Tron: 'a little TRX', Bitcoin: 'a little BTC',
+    BSquared: 'a little BTC', BOB: 'a little BTC', Merlin: 'a little BTC', Rootstock: 'a little BTC',
+    Berachain: 'a little BERA', 'Hyperliquid L1': 'a little HYPE', 'Plume Mainnet': 'a little PLUME',
+    Stellar: 'a little XLM', Algorand: 'a little ALGO', Flare: 'a little FLR', CORE: 'a little CORE',
+    Sei: 'a little SEI', Aptos: 'a little APT', Near: 'a little NEAR', Cosmos: 'a little ATOM',
+    Osmosis: 'a little OSMO', Fantom: 'a little FTM', Cronos: 'a little CRO', Monad: 'a little MON',
+    Sonic: 'a little S', Bittensor: 'a little TAO', Plasma: 'a little XPL', Mantle: 'a little MNT',
+    Starknet: 'a little STRK', TON: 'a little TON', Ronin: 'a little RON', Kava: 'a little KAVA',
+    Chiliz: 'a little CHZ', Stacks: 'a little STX', XDC: 'a little XDC', Klaytn: 'a little KLAY',
+    Ripple: 'a little XRP', WEMIX: 'a little WEMIX', Qubic: 'a little QUBIC', Mixin: 'a little XIN',
+    ZIGChain: 'a little ZIG', 'Bifrost Network': 'a little BNC', RSK: 'a little RBTC',
+    Proton: 'a little XPR', Provenance: 'a little HASH', Canton: 'a little CC',
+  };
+  return map[chain] ?? 'enough of the chain’s native gas token';
+}
+
 /** How much capital one farm position needs, from the protocol's own TVL. */
 function capitalFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 1_000_000_000) return 250;
@@ -414,10 +520,10 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** A deterministic 0..n-1 pick from a slug, so similar protocols still read differently. */
-function pick(slug: string, n: number): number {
+/** A deterministic 0..n-1 pick from a key string, so similar protocols still read differently. */
+function pick(key: string, n: number): number {
   let h = 0;
-  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return h % n;
 }
 
@@ -425,241 +531,407 @@ function pick(slug: string, n: number): number {
  * One category's farm profile: what the product is and what a farmer actually does with it. The
  * profile is keyed on the category's words, never on a protocol's name: the same rules score and
  * describe every row, and the chain, capital and holding period come from that row's own record.
+ * Each profile carries two core wordings, three second actions, three weekly actions, two watch
+ * wordings and one caution, picked deterministically per slug so no two rows read alike.
  */
 interface FarmProfile {
-  core: string;
+  core: string[];
   second: string[];
-  weekly: string;
-  watch: string;
+  weekly: string[];
+  watch: string[];
+  caution: string;
 }
 
 const PROFILES: [RegExp, FarmProfile][] = [
   [
     /risk curator|onchain capital|curator|allocator/i,
     {
-      core: 'Deposit $${capital} into a {name} vault on {chain} and read the vault strategy page first so you know what the curator does with it',
+      core: [
+        'Deposit $${capital} into {a} {name} vault on {chain} and read the vault strategy page first so you know what the curator does with it',
+        'Allocate $${capital} to {a} {name} vault on {chain} after reading which assets the curator puts the vault into and what fee it charges',
+      ],
       second: [
         'Allocate a second, smaller deposit to a different {name} vault so the wallet shows two vaults, not one',
-        'Vote on a {name} curator proposal or reallocate between two of its vaults',
+        'Vote on {a} {name} curator proposal or reallocate between two of its vaults',
+        'Move a small part of the deposit to a second {name} vault with a different strategy',
       ],
-      weekly: 'rebalance a small amount between two {name} vaults',
-      watch: 'the vault page for strategy changes and the curator fee it charges',
+      weekly: ['rebalance a small amount between two {name} vaults', 'check which {name} vaults changed strategy this week', 'move a small amount into the {name} vault with the newest strategy'],
+      watch: ['the {name} vault page for strategy changes and the curator fee it charges', 'the {name} vault page for new strategies the curator opens'],
+      caution: 'Curators move funds between strategies, so read the vault page before every deposit and never treat a vault as a savings account.',
     },
   ],
   [
     /rwa/i,
     {
-      core: 'Buy or mint $${capital} of the tokenized real-world asset {name} offers on {chain}, after reading the issuer and redemption terms on its own page',
-      second: [
-        'Hold the asset through one full yield payout and record the date it lands',
-        'Redeem a small test amount back to stablecoins to confirm the redemption path works',
+      core: [
+        'Buy or mint $${capital} of the tokenized real-world asset {name} offers on {chain}, after reading the issuer and redemption terms on its own page',
+        'Put $${capital} into {name}’s tokenized asset on {chain} once you have read the issuer, the backing and the redemption terms on its own page',
       ],
-      weekly: 'check the asset price and any new issuance {name} lists',
-      watch: 'the issuer page for redemption windows and the asset’s backing report',
+      second: [
+        'Hold the {name} asset through one full yield payout and record the date it lands',
+        'Redeem a small test amount of the {name} asset back to stablecoins to confirm the redemption path works',
+        'Buy a second, smaller RWA position {name} lists on {chain}',
+      ],
+      weekly: ['check the asset price and any new issuance {name} lists', 'check the yield payout {name} has scheduled', 'review the backing report {name} publishes'],
+      watch: ['the {name} issuer page for redemption windows and the asset’s backing report', 'the {name} issuer page for new asset listings and redemption dates'],
+      caution: 'Redemption is the risk: confirm the window, the minimum and the fee before you deposit, and never assume an RWA redeems instantly.',
     },
   ],
   [
     /lend|collateral markets/i,
     {
-      core: 'Supply $${capital} of USDC to {name} on {chain} as collateral and keep the position open',
-      second: [
-        'Borrow a small amount against the collateral, then repay it the same week so the wallet shows both sides of the market',
-        'Supply a second asset, such as wrapped ETH, to a different {name} market on {chain}',
+      core: [
+        'Supply $${capital} of USDC to {name} on {chain} as collateral and keep the position open',
+        'Lend $${capital} of USDC on {name} on {chain} and leave the supply position open',
       ],
-      weekly: 'adjust the collateral or repay a small part of a borrow on {name}',
-      watch: 'your health factor and the borrow rate on {name}',
+      second: [
+        'Borrow a small amount against the {name} collateral, then repay it the same week so the wallet shows both sides of the market',
+        'Supply a second asset, such as wrapped ETH, to a different {name} market on {chain}',
+        'Repay the {name} borrow in full, then borrow a smaller amount again',
+      ],
+      weekly: ['adjust the collateral or repay a small part of a borrow on {name}', 'check the supply rate {name} pays and top up the position', 'repay a little of any borrow on {name}'],
+      watch: ['your health factor and the borrow rate on {name}', 'the borrow rate and your health factor on {name}'],
+      caution: 'Watch the health factor every week: if it drifts toward liquidation, add collateral or repay before the market moves, not after.',
     },
   ],
   [
     /cdp|stablecoin/i,
     {
-      core: 'Lock $${capital} of collateral in {name} on {chain} and mint its stable asset, keeping the collateral ratio well above the liquidation line',
-      second: [
-        'Repay part of the minted stable asset, then mint again, so the wallet shows a full borrow cycle',
-        'Provide the minted stable asset to a {name} stability pool on {chain}',
+      core: [
+        'Lock $${capital} of collateral in {name} on {chain} and mint its stable asset, keeping the collateral ratio well above the liquidation line',
+        'Deposit $${capital} of collateral into {name} on {chain}, mint a modest amount of its stable asset and keep the ratio comfortably above liquidation',
       ],
-      weekly: 'top up collateral or repay a little of the minted amount on {name}',
-      watch: 'the collateral ratio and the stable asset’s peg on {name}',
+      second: [
+        'Repay part of the stable asset {name} minted, then mint again, so the wallet shows a full borrow cycle',
+        'Provide the minted stable asset to {a} {name} stability pool on {chain}',
+        'Swap a small part of the stable asset {name} minted for USDC on {chain} and hold the rest',
+      ],
+      weekly: ['top up collateral or repay a little of the minted amount on {name}', 'check the peg of the stable asset {name} mints', 'adjust the collateral ratio on {name} if the market moved'],
+      watch: ['the collateral ratio and the stable asset’s peg on {name}', 'the stability pool rate and the peg on {name}'],
+      caution: 'Mint less than the maximum: a collateral ratio near the line is one price swing from liquidation.',
     },
   ],
   [
     /dex|liquidity manager/i,
     {
-      core: 'Provide $${capital} of liquidity to {name}’s main pool on {chain}, in the pair its own page lists as the deepest',
+      core: [
+        'Provide $${capital} of liquidity to {name}’s main pool on {chain}, in the pair its own page lists as the deepest',
+        'Add $${capital} of liquidity to the deepest {name} pool on {chain}, in the pair its own page lists first',
+      ],
       second: [
         'Swap a small amount through {name} on {chain} in both directions so the wallet shows swaps as well as liquidity',
         'Move the position into a different {name} fee tier for one week, then move it back',
+        'Collect the fees the {name} position earned and add them back to the pool',
       ],
-      weekly: 'swap a small amount or collect fees on {name}',
-      watch: 'the pool page for fees earned and impermanent loss on {name}',
+      weekly: ['swap a small amount or collect fees on {name}', 'check the fees the {name} position earned', 'rebalance the {name} position if its range drifted'],
+      watch: ['the pool page for fees earned and impermanent loss on {name}', 'the pool page for the fee tier and the range on {name}'],
+      caution: 'Liquidity earns fees but loses to price moves: check impermanent loss on the pool page before adding more.',
     },
   ],
   [
     /yield|leveraged farm/i,
     {
-      core: 'Deposit $${capital} into {name}’s main yield position on {chain} and keep it staked',
+      core: [
+        'Deposit $${capital} into {name}’s main yield position on {chain} and keep it staked',
+        'Stake $${capital} in {name}’s main yield position on {chain} and leave it compounding',
+      ],
       second: [
         'Compound the yield once, restaking the rewards back into the same {name} position',
         'Open a second, smaller {name} position in a different pool on {chain}',
+        'Claim the yield once and restake it through {name}’s own page',
       ],
-      weekly: 'claim and restake a small amount of yield on {name}',
-      watch: 'the position page for the yield rate and any lock-up it carries',
+      weekly: ['claim and restake a small amount of yield on {name}', 'check the yield rate {name} pays', 'compound the yield {name} paid this week'],
+      watch: ['the {name} position page for the yield rate and any lock-up it carries', 'the {name} position page for the reward token and its lock-up'],
+      caution: 'Read the lock-up before you deposit: yield that cannot be withdrawn for weeks is not the same as yield you can claim.',
     },
   ],
   [
     /basis trading/i,
     {
-      core: 'Deposit $${capital} into {name}’s basis vault on {chain} and read how it earns the funding-rate spread before you deposit',
-      second: [
-        'Hold the vault position through one funding-rate cycle and record the payout',
-        'Withdraw a small test amount to confirm the vault’s exit works',
+      core: [
+        'Deposit $${capital} into {name}’s basis vault on {chain} and read how it earns the funding-rate spread before you deposit',
+        'Put $${capital} into {name}’s basis vault on {chain} after reading how it captures the funding-rate spread',
       ],
-      weekly: 'check the funding rate {name} is capturing',
-      watch: 'the vault page for funding-rate changes and withdrawal delays',
+      second: [
+        'Hold the {name} vault position through one funding-rate cycle and record the payout',
+        'Withdraw a small test amount to confirm the {name} vault’s exit works',
+        'Check the funding rate {name} captured this week and record it',
+      ],
+      weekly: ['check the funding rate {name} is capturing', 'check the {name} vault’s payout for the week', 'review the basis spread {name} is earning'],
+      watch: ['the {name} vault page for funding-rate changes and withdrawal delays', 'the {name} vault page for the funding rate and any withdrawal queue'],
+      caution: 'A basis vault earns when funding is positive and can pay out slowly when it turns: check the withdrawal delay before you deposit.',
     },
   ],
   [
     /liquid staking|restak|staking pool/i,
     {
-      core: 'Stake $${capital} of the chain’s staking asset through {name} on {chain} and keep the receipt token in the same wallet',
+      core: [
+        'Stake $${capital} of the chain’s staking asset through {name} on {chain} and keep the receipt token in the same wallet',
+        'Stake $${capital} through {name} on {chain} and hold the receipt token it issues in the same wallet',
+      ],
       second: [
         'Use the receipt token in one {name}-supported pool on {chain}, then return it to the wallet',
         'Restake the receipt token through {name} a second time if its page offers it',
+        'Swap a small part of the {name} receipt token back to the staking asset to test the exit',
       ],
-      weekly: 'check the staking rewards the receipt token has earned',
-      watch: 'the staking page for the exchange rate of the receipt token',
+      weekly: ['check the staking rewards the {name} receipt token has earned', 'check the exchange rate of the receipt token {name} issues', 'claim any staking rewards {name} has paid'],
+      watch: ['the {name} staking page for the exchange rate of the receipt token', 'the {name} staking page for the receipt token’s exchange rate and any unbonding delay'],
+      caution: 'The receipt token’s exchange rate is the position: if it slips against the staking asset, find out why before adding more.',
     },
   ],
   [
     /bridge|canonical bridge|cross chain/i,
     {
-      core: 'Bridge $${capital} of USDC to {chain} through {name} and use the bridged funds in an app on the destination chain',
-      second: [
-        'Bridge a smaller amount back the other way so the wallet shows both directions',
-        'Bridge to a second destination chain {name} supports and hold the funds there for a week',
+      core: [
+        'Bridge $${capital} of USDC to {chain} through {name} and use the bridged funds in an app on the destination chain',
+        'Send $${capital} of USDC across {name} to {chain} and put the bridged funds to work in an app on that chain',
       ],
-      weekly: 'bridge a small amount through {name} to a chain you already use',
-      watch: 'the bridge page for fees and the time a transfer takes',
+      second: [
+        'Bridge a smaller amount back through {name} so the wallet shows both directions',
+        'Bridge to a second destination chain {name} supports and hold the funds there for a week',
+        'Use the bridged funds in a second app on {chain} before bridging any back through {name}',
+      ],
+      weekly: ['bridge a small amount through {name} to a chain you already use', 'bridge a small amount through {name} and use it the same day', 'check the bridge fee {name} charges this week'],
+      watch: ['the {name} bridge page for fees and the time a transfer takes', 'the {name} bridge page for the fee and the transfer time'],
+      caution: 'Bridges are the most phished surface in crypto: only use the link {name}’s own site publishes, and never bridge to an address you have not checked twice.',
     },
   ],
   [
     /derivative|perpetual/i,
     {
-      core: 'Deposit $${capital} of USDC as margin on {name} and open one small hedged position, sized so a sharp move cannot liquidate it',
-      second: [
-        'Close the position, then open a second one in the opposite direction with a smaller size',
-        'Place one limit order on {name} and let it fill or expire on its own',
+      core: [
+        'Deposit $${capital} of USDC as margin on {name} and open one small hedged position, sized so a sharp move cannot liquidate it',
+        'Fund $${capital} of USDC margin on {name} and open one small position you could afford to lose outright',
       ],
-      weekly: 'open and close one small hedged position on {name}',
-      watch: 'your margin, the funding rate and the liquidation price on {name}',
+      second: [
+        'Close the {name} position, then open a second one in the opposite direction with a smaller size',
+        'Place one limit order on {name} and let it fill or expire on its own',
+        'Set a stop on the {name} position and check that it triggers as expected',
+      ],
+      weekly: ['open and close one small hedged position on {name}', 'review the funding rate on your {name} position', 'close any {name} position you no longer want to hold'],
+      watch: ['your margin, the funding rate and the liquidation price on {name}', 'the liquidation price and the funding rate on {name}'],
+      caution: 'Size the position so a sharp move cannot liquidate it: margin that can be wiped out in one candle is not farming.',
     },
   ],
   [
     /^chain$/i,
     {
-      core: 'Bridge $${capital} of USDC to the {name} chain and use it in one of the chain’s own apps, keeping the funds on the chain',
-      second: [
-        'Swap a small amount on the chain’s main dex and hold the received asset for a week',
-        'Try a second native app on {name} with a small amount',
+      core: [
+        'Bridge $${capital} of USDC to the {name} chain and use it in one of the chain’s own apps, keeping the funds on the chain',
+        'Move $${capital} of USDC onto the {name} chain and put it to work in a native app, keeping the funds on the chain',
       ],
-      weekly: 'make one transaction in a native app on {name}',
-      watch: 'the chain’s own explorer for your transaction history',
+      second: [
+        'Swap a small amount on {name}’s main dex and hold the received asset for a week',
+        'Try a second native app on {name} with a small amount',
+        'Provide a small amount of liquidity on {name}’s main dex',
+      ],
+      weekly: ['make one transaction in a native app on {name}', 'use one native app on {name} this week', 'check what is new on the {name} chain this week'],
+      watch: ['the {name} chain’s own explorer for your transaction history', 'the {name} chain’s explorer for new apps and your transactions'],
+      caution: 'A new chain’s apps are the risk: use the chain’s own app list, start small, and never connect the wallet to a lookalike site.',
+    },
+  ],
+  [
+    /card issuer/i,
+    {
+      core: [
+        'Top up {name}’s card with $${capital} on {chain} and spend a small amount on something you would buy anyway',
+        'Load $${capital} onto the {name} card on {chain} and make one real purchase with it',
+      ],
+      second: [
+        'Receive one cashback or reward payout from {name} into the same wallet',
+        'Spend through {name} a second time in a different category',
+        'Set up a small recurring top-up for the {name} card',
+      ],
+      weekly: ['make one real payment through {name}', 'spend a small amount with the {name} card', 'check the rewards {name} paid this week'],
+      watch: ['the {name} card page for fees, limits and reward rates', 'the {name} card page for the reward rate and the spending limit'],
+      caution: 'A card is spending, not an investment: only load what you plan to spend, and check the fee on every top-up.',
     },
   ],
   [
     /payment/i,
     {
-      core: 'Pay $${capital} through {name} on {chain} for something you would buy anyway, using its own checkout or card flow',
+      core: [
+        'Pay $${capital} through {name} on {chain} for something you would buy anyway, using its own checkout flow',
+        'Send $${capital} through {name} on {chain} to pay for a real purchase, using its own checkout flow',
+      ],
       second: [
         'Receive one payment through {name} into the same wallet',
         'Set up a recurring payment through {name} for a small weekly amount',
+        'Pay a second, smaller amount through {name} to a different recipient',
       ],
-      weekly: 'make one real payment through {name}',
-      watch: 'the payments page for settlement times and fees',
+      weekly: ['make one real payment through {name}', 'send one payment through {name} this week', 'check the settlement time on your last {name} payment'],
+      watch: ['the {name} payments page for settlement times and fees', 'the {name} payments page for the fee on each payment'],
+      caution: 'Payments are final on-chain: check the recipient address twice, and never pay an invoice that arrived by DM.',
     },
   ],
   [
     /insurance/i,
     {
-      core: 'Buy $${capital} of cover from {name} on {chain} for a position you already hold, and read what the policy excludes',
+      core: [
+        'Buy $${capital} of cover from {name} on {chain} for a position you already hold, and read what the policy excludes',
+        'Take $${capital} of cover on {name} on {chain} for a position you hold, after reading the exclusions on its own page',
+      ],
       second: [
         'Buy a second, smaller cover for a different risk {name} lists',
         'File a test claim inquiry through {name}’s own page to learn the process, without filing a false claim',
+        'Check the premium {name} charges for a longer cover period',
       ],
-      weekly: 'check the cover’s expiry and the premium {name} charges',
-      watch: 'the policy page for expiry dates and claim conditions',
+      weekly: ['check the cover’s expiry and the premium {name} charges', 'check whether the {name} cover you hold still matches the position', 'review the claim conditions on your {name} cover'],
+      watch: ['the {name} policy page for expiry dates and claim conditions', 'the {name} policy page for the claim process and the exclusions'],
+      caution: 'Cover only pays for what the policy names: read the exclusions before you buy, not after something goes wrong.',
     },
   ],
   [
     /prediction/i,
     {
-      core: 'Fund $${capital} and place one position on a {name} market you have actually read, on {chain}',
+      core: [
+        'Fund $${capital} and place one position on {a} {name} market you have actually read, on {chain}',
+        'Put $${capital} into one {name} market on {chain} after reading its resolution rules in full',
+      ],
       second: [
         'Take the opposite side of a small market on {name} to show both directions',
-        'Provide liquidity to a {name} market instead of taking a side',
+        'Provide liquidity to {a} {name} market instead of taking a side',
+        'Close the position before resolution and record the result',
       ],
-      weekly: 'settle or close one position on {name}',
-      watch: 'your open positions and the market’s resolution rules',
+      weekly: ['settle or close one position on {name}', 'check the resolution rules on your open {name} markets', 'close one {name} position this week'],
+      watch: ['your open positions on {name} and the market’s resolution rules', 'the {name} market page for resolution dates and rules'],
+      caution: 'A prediction market pays on its written resolution rules, not on what happened in the world: read them before you place anything.',
     },
   ],
   [
     /governance/i,
     {
-      core: 'Deposit $${capital} into {name} on {chain} and delegate or vote with the position on a live proposal',
+      core: [
+        'Deposit $${capital} into {name} on {chain} and delegate or vote with the position on a live proposal',
+        'Put $${capital} into {name} on {chain} and vote with it on a live proposal',
+      ],
       second: [
         'Vote on a second {name} proposal from the same wallet',
-        'Join a {name} discussion thread and post one substantive comment',
+        'Join {a} {name} discussion thread and post one substantive comment',
+        'Delegate the position to a delegate {name} lists, then vote yourself on the next proposal',
       ],
-      weekly: 'vote on any new {name} proposal that opens',
-      watch: 'the governance page for new proposals and voting deadlines',
+      weekly: ['vote on any new {name} proposal that opens', 'check which {name} proposals are open this week', 'read one {name} proposal discussion this week'],
+      watch: ['the {name} governance page for new proposals and voting deadlines', 'the {name} governance page for voting deadlines'],
+      caution: 'Votes are on-chain and public: read the proposal before you vote, and never delegate to an address you have not checked.',
     },
   ],
   [
     /index/i,
     {
-      core: 'Buy $${capital} of the {name} index on {chain} and hold the index token in the wallet',
+      core: [
+        'Buy $${capital} of the {name} index on {chain} and hold the index token in the wallet',
+        'Put $${capital} into the {name} index on {chain} and hold the index token',
+      ],
       second: [
         'Rebalance the index position once through {name}’s own page',
-        'Mint the index with its underlying assets instead of buying it outright',
+        'Mint the {name} index with its underlying assets instead of buying it outright',
+        'Redeem a small part of the {name} index to test the exit',
       ],
-      weekly: 'check the index composition {name} publishes',
-      watch: 'the index page for rebalances and fees',
+      weekly: ['check the index composition {name} publishes', 'check the {name} index price against its underlying assets', 'review the rebalances {name} made this week'],
+      watch: ['the {name} index page for rebalances and fees', 'the {name} index page for the fee and the next rebalance'],
+      caution: 'An index is only as good as its composition: check what it holds and when it rebalances before you buy.',
     },
   ],
   [
     /launchpad/i,
     {
-      core: 'Stake $${capital} through {name} on {chain} to qualify for its launches and join one sale with a small allocation',
-      second: [
-        'Claim the allocation from the sale and hold it for a week',
-        'Join a second {name} launch with a smaller allocation',
+      core: [
+        'Stake $${capital} through {name} on {chain} to qualify for its launches and join one sale with a small allocation',
+        'Put $${capital} to work through {name} on {chain} to qualify for a launch, and take a small allocation in one sale',
       ],
-      weekly: 'check which launches {name} has open',
-      watch: 'the launchpad page for sale dates and allocation rules',
+      second: [
+        'Claim the allocation from the {name} sale and hold it for a week',
+        'Join a second {name} launch with a smaller allocation',
+        'Check the vesting terms on the allocation {name} gave you',
+      ],
+      weekly: ['check which launches {name} has open', 'check the sale calendar {name} publishes', 'review your allocations on {name}'],
+      watch: ['the {name} launchpad page for sale dates and allocation rules', 'the {name} launchpad page for the next sale date'],
+      caution: 'Launch allocations can vest for months: read the vesting schedule before you join, and never buy an allocation from a third party.',
     },
   ],
   [
     /option/i,
     {
-      core: 'Deposit $${capital} as collateral on {name} and buy one small option on {chain}, sized so the most you can lose is the premium',
+      core: [
+        'Deposit $${capital} as collateral on {name} and buy one small option on {chain}, sized so the most you can lose is the premium',
+        'Post $${capital} as collateral on {name} and buy one small option on {chain}, risking only the premium',
+      ],
       second: [
         'Sell one covered option on {name} against an asset you hold',
-        'Close the option before expiry and record the result',
+        'Close the {name} option before expiry and record the result',
+        'Buy a second option on {name} with a different expiry',
       ],
-      weekly: 'review open option positions on {name}',
-      watch: 'expiry dates and implied volatility on {name}',
+      weekly: ['review open option positions on {name}', 'check the expiry dates on your {name} options', 'close any {name} option near expiry'],
+      watch: ['expiry dates and implied volatility on {name}', 'the {name} option page for expiry dates and volatility'],
+      caution: 'An option you buy can only lose its premium, but an option you sell can lose far more: never sell uncovered.',
+    },
+  ],
+  [
+    /cedefi/i,
+    {
+      core: [
+        'Deposit $${capital} into {name}’s managed vault on {chain} and read who holds custody and how withdrawals work before you deposit',
+        'Put $${capital} into {a} {name} vault on {chain} once you have read the custodian, the strategy and the withdrawal terms',
+      ],
+      second: [
+        'Withdraw a small test amount from {name} to confirm the custodian’s exit path works',
+        'Move a small amount to a second {name} vault with a different strategy',
+        'Check the audit or proof of reserves {name} publishes for the vault',
+      ],
+      weekly: ['check the vault return {name} reports', 'check the custodian report {name} publishes', 'review the withdrawal queue on {name}'],
+      watch: ['the {name} vault page for the custodian, the strategy and withdrawal terms', 'the {name} vault page for withdrawal delays'],
+      caution: 'CeDeFi means a custodian holds the funds: read who it is and how withdrawals work before you deposit anything.',
+    },
+  ],
+  [
+    /farm/i,
+    {
+      core: [
+        'Deposit $${capital} into {name}’s farm on {chain} and stake the position to earn its rewards',
+        'Put $${capital} into {a} {name} farm on {chain} and keep the staked position open',
+      ],
+      second: [
+        'Harvest the farm rewards once and restake them into the same {name} farm',
+        'Open a second, smaller {name} farm position in a different pool',
+        'Claim the rewards {name} paid and record the amount',
+      ],
+      weekly: ['harvest and restake a small amount of farm rewards on {name}', 'check the farm reward rate {name} pays', 'compound the rewards {name} paid this week'],
+      watch: ['the {name} farm page for the reward rate and any lock-up', 'the {name} farm page for the reward token and its lock-up'],
+      caution: 'Farm rewards are often paid in a token that falls as fast as it is farmed: check what the reward is worth before restaking it.',
+    },
+  ],
+  [
+    /anchor btc|decentralized btc|bitcoin/i,
+    {
+      core: [
+        'Deposit $${capital} of BTC into {name} on {chain} to earn yield on it, after reading how the yield is generated on its own page',
+        'Put $${capital} of BTC to work through {name} on {chain} once you have read where its yield comes from',
+      ],
+      second: [
+        'Withdraw a small test amount of BTC from {name} to confirm the exit works',
+        'Move a small amount of the yield into a second {name} position',
+        'Check the BTC yield {name} paid this week and record it',
+      ],
+      weekly: ['check the BTC yield {name} is paying', 'check the yield {name} paid on your BTC', 'review the yield source {name} reports'],
+      watch: ['the {name} position page for the BTC yield and any lock-up', 'the {name} position page for the yield source and withdrawal terms'],
+      caution: 'BTC yield always has a source — lending, staking or basis: read what it is before you deposit, and never assume BTC yield is risk-free.',
     },
   ],
 ];
 
 const DEFAULT_PROFILE: FarmProfile = {
-  core: 'Deposit $${capital} of USDC into {name} on {chain} and keep the position open',
+  core: [
+    'Deposit $${capital} of USDC into {name} on {chain} and keep the position open',
+    'Put $${capital} of USDC to work in {name}’s main product on {chain} and leave the position open',
+  ],
   second: [
     'Make a second, smaller deposit into a different {name} product on {chain}',
     'Use one more feature of {name} on {chain}, such as a swap or a vote, from the same wallet',
+    'Try a second {name} product on {chain} with a small amount',
   ],
-  weekly: 'repeat one qualifying action on {name}',
-  watch: 'the protocol page for points, rewards or changes to its terms',
+  weekly: ['repeat one qualifying action on {name}', 'make one transaction on {name} this week', 'check what is new on {name} this week'],
+  watch: ['the {name} protocol page for points, rewards or changes to its terms', 'the {name} protocol page for new features and reward terms'],
+  caution: 'Read the protocol’s own page before every new action: a product you have not read is a risk you have not priced.',
 };
 
 function profileFor(p: SnapshotProtocol): FarmProfile {
@@ -670,32 +942,72 @@ function profileFor(p: SnapshotProtocol): FarmProfile {
   return DEFAULT_PROFILE;
 }
 
-function fill(template: string, p: SnapshotProtocol, capital: number, chain: string): string {
-  return template.replaceAll('${capital}', String(capital)).replaceAll('{name}', p.name).replaceAll('{chain}', chain);
+/** "a" or "an" before a protocol's name: vowel-initial names take "an" (USDD is pronounced "yoo", so it takes "a"). */
+function articleFor(name: string): string {
+  return /^[aeiou]/i.test(name) && !/^usdd/i.test(name) ? 'an' : 'a';
 }
+
+function fill(template: string, p: SnapshotProtocol, capital: number, chain: string): string {
+  return template
+    .replaceAll('${capital}', String(capital))
+    .replaceAll('{name}', p.name)
+    .replaceAll('{chain}', chain)
+    .replaceAll('{slug}', p.slug)
+    .replaceAll('{gas}', gasToken(chain))
+    .replaceAll('{a}', articleFor(p.name));
+}
+
+/** The first step's three wordings: entry through the protocol's DefiLlama page, fresh wallet, test deposit. */
+const ENTRY_STEPS = [
+  'Open {name}’s official app — find its link on its DefiLlama page, defillama.com/protocol/{slug} — from a fresh wallet that holds only your farming funds, and keep that wallet’s seed phrase offline. Send a $10 test deposit first and confirm it lands before the full amount.',
+  'Set up a fresh wallet that holds only the funds you plan to farm with, and keep its seed phrase offline. Find {name}’s official app through its DefiLlama page, defillama.com/protocol/{slug}, and send a $10 test deposit on {chain} first — keep {gas} in the wallet for fees, and confirm the test lands before the full amount.',
+  'Use a fresh wallet for {name} only, with its seed phrase kept offline. Open the protocol’s app from its DefiLlama page, defillama.com/protocol/{slug}, and make a $10 test deposit on {chain} first to confirm the path works — keep {gas} aside for fees — before the full amount.',
+];
+
+/** The last step's four wordings: claim safety, each ending on the no-promise sentence. */
+const SAFETY_STEPS = [
+  'If {name} ever opens a claim, use only the link its own site or official account publishes, never pay to claim, and never sign an approval you have not read. DefiLlama’s record lists no token for {name}, so nothing here promises an airdrop or any return.',
+  'Never pay to claim anything from {name}, and only trust a claim link its own site or official account publishes. Read every approval before you sign it. DefiLlama’s record lists no token for {name}, so nothing here promises an airdrop or any return.',
+  'Treat any claim link for {name} that arrives by DM or search ad as a scam: the only trustworthy link is one its own site or official account publishes, and claiming is never paid. DefiLlama’s record lists no token for {name}, so nothing here promises an airdrop or any return.',
+  'Before you sign anything for {name}, read the approval and check what it can move — a farming position never needs an unlimited approval. DefiLlama’s record lists no token for {name}, so nothing here promises an airdrop or any return.',
+];
+
+/** The hold step's two wordings. */
+const HOLD_STEPS = [
+  'Hold the position for at least {hold} days so the activity is counted in more than one snapshot, and check {watch} once a week.',
+  'Keep the position open for at least {hold} days — activity across several snapshots counts more than a single deposit — and each week check {watch}.',
+];
 
 /**
  * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived
  * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of
- * names. Every step says what to do, what it costs and how long it takes, and the last step says
- * plainly that DefiLlama's record lists no token for this protocol, so nothing here promises an
- * airdrop or any return.
+ * names. Step 1 names the entry (the protocol's DefiLlama page), step 2 the core action with its
+ * caution, steps 3-5 the second action, the weekly action and the hold, and step 6 the claim
+ * safety note. Every step says what to do, what it costs and how long it takes, and the last step
+ * says plainly that DefiLlama's record lists no token for this protocol, so nothing here promises
+ * an airdrop or any return.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const profile = profileFor(p);
-  const second = profile.second[pick(p.slug, profile.second.length)]!;
+  const core = profile.core[pick(`${p.slug}:core`, profile.core.length)]!;
+  const second = profile.second[pick(`${p.slug}:second`, profile.second.length)]!;
+  const weekly = profile.weekly[pick(`${p.slug}:weekly`, profile.weekly.length)]!;
+  const watch = profile.watch[pick(`${p.slug}:watch`, profile.watch.length)]!;
+  const entry = ENTRY_STEPS[pick(`${p.slug}:entry`, ENTRY_STEPS.length)]!;
+  const safety = SAFETY_STEPS[pick(`${p.slug}:safety`, SAFETY_STEPS.length)]!;
+  const holdStep = HOLD_STEPS[pick(`${p.slug}:hold`, HOLD_STEPS.length)]!;
   const gas = capital >= 150 ? 8 : 4;
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline. Send a $10 test deposit to ${p.name} on ${chain} first and confirm it lands before the full amount.`,
-      cost: 'under $3 of gas for the first transaction',
+      text: fill(entry, p, capital, chain),
+      cost: 'a few dollars of network fees for the first transaction',
       time: '15 minutes',
     },
     {
-      text: `${fill(profile.core, p, capital, chain)}.`,
+      text: `${fill(core, p, capital, chain)}. ${fill(profile.caution, p, capital, chain)}`,
       cost: `$${capital} of capital and about $${gas} of gas`,
       time: '15 minutes to set up',
     },
@@ -705,17 +1017,17 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes',
     },
     {
-      text: `Make one qualifying action each week, such as ${fill(profile.weekly, p, capital, chain)}.`,
+      text: `Once a week, ${fill(weekly, p, capital, chain)}.`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot, and check ${fill(profile.watch, p, capital, chain)} once a week.`,
+      text: fill(holdStep, p, capital, chain).replaceAll('{hold}', String(hold)).replaceAll('{watch}', fill(watch, p, capital, chain)),
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `If ${p.name} ever opens a claim, use only the link its own site or official account publishes, never pay to claim, and never sign an approval you have not read. DefiLlama's record lists no token for ${p.name}, so nothing here promises an airdrop or any return.`,
+      text: fill(safety, p, capital, chain),
       cost: 'no fee to check',
       time: '10 minutes',
     },
@@ -755,7 +1067,12 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     size_multiple: row.model.size_multiple,
+    global_multiple: row.model.global_multiple,
+    category_multiple: row.model.category_multiple,
     category_factor: row.model.category_factor,
+    category_weight: row.model.category_weight,
+    category_peers: row.model.category_peers,
+    category_median_multiple: row.model.category_median_multiple,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     chains_multiplier: row.model.chains_multiplier,
@@ -776,7 +1093,7 @@ export function buildRadar(snapshot: Snapshot, params: ModelParams = PARAMS): { 
     model_version: MODEL_VERSION,
     params,
     curve: model.curve,
-    category_factors: model.category_factors,
+    category_multiples: model.category_multiples,
     watchlist_size: snapshot.watchlist.length,
     watchlist_slugs: [...snapshot.watchlist],
     board_size: board.length,

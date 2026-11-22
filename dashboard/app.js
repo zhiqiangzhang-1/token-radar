@@ -138,8 +138,12 @@
       '<span>Token <b>none on record</b></span></div>' +
       '<div class="big">' + moneyFull(r.implied_value_usd) + ' <small>implied value &mdash; the board&rsquo;s central estimate for this protocol&rsquo;s token, if it ever issues one</small></div>' +
       '<div class="modelbox"><table><thead><tr><th>Model step</th><th class="num">Figure</th><th>What it means</th></tr></thead><tbody>' +
-      '<tr><td>Size curve at this TVL</td><td class="num">&times;' + r.size_multiple.toFixed(3) + '</td><td>Market multiple for a protocol of this size (base ' + moneyFull(Math.round(r.tvl_usd * r.size_multiple)) + ')</td></tr>' +
-      '<tr><td>Category factor</td><td class="num">&times;' + r.category_factor.toFixed(3) + '</td><td>' + esc(catName(r.category)) + ' peers trade at this much of the curve</td></tr>' +
+      '<tr><td>Size curve at this TVL</td><td class="num">&times;' + r.global_multiple.toFixed(3) + '</td><td>The market multiple for a protocol of this size, from the global curve</td></tr>' +
+      '<tr><td>Category multiple</td><td class="num">' + (r.category_multiple === null ? '\u2014' : '&times;' + r.category_multiple.toFixed(3)) + '</td><td>' +
+      (r.category_peers === 0 ? 'No live peers in this category, so the curve alone prices it' :
+        esc(catName(r.category)) + ' peers: ' + r.category_peers + ' live tokens, median &times;' + r.category_median_multiple.toFixed(3) +
+        ' moved to this TVL, weight ' + r.category_weight.toFixed(2)) + '</td></tr>' +
+      '<tr><td>Blended multiple</td><td class="num">&times;' + r.size_multiple.toFixed(3) + '</td><td>Category and curve blended by sample size (base ' + moneyFull(Math.round(r.tvl_usd * r.size_multiple)) + ')</td></tr>' +
       '<tr><td>7-day momentum</td><td class="num">&times;' + r.growth_multiplier.toFixed(3) + '</td><td>TVL moved ' + (r.change_7d === null ? 'unreported' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1) + '%') + ' in 7 days, at half weight</td></tr>' +
       '<tr><td>Maturity</td><td class="num">&times;' + r.maturity_multiplier.toFixed(3) + '</td><td>' + ageText(r.age_days) + ' of track record</td></tr>' +
       '<tr><td>Chain reach</td><td class="num">&times;' + r.chains_multiplier.toFixed(3) + '</td><td>' + r.chains.length + ' chain' + (r.chains.length === 1 ? '' : 's') + '</td></tr>' +
@@ -157,13 +161,14 @@
       ' live-token protocols that carry both a market cap and a TVL. A regression of log(market cap) on log(TVL) gives ' +
       '<b>log(mcap) = ' + c.intercept.toFixed(2) + ' + ' + c.slope.toFixed(2) + ' &times; log(tvl)</b>. ' +
       'The multiple a token commands falls as TVL grows: about &times;0.67 at $5M of TVL, &times;0.22 at $50M, &times;0.05 at $1B. ' +
-      'Each category with at least three live peers is then adjusted by its peers&rsquo; median residual against that curve, ' +
-      'shrunk toward no adjustment and clamped to &times;0.50&ndash;&times;2.00. Momentum, age and chain count add small bounded multipliers. ' +
+      'Each category with at least three live peers then contributes its own median mcap/TVL, moved to the protocol&rsquo;s size along the curve ' +
+      'and blended with the curve by sample size (weight n/(n+4)), the blend kept within 0.15&times;&ndash;3.0&times; of the curve; ' +
+      'categories with fewer than three peers are priced by the curve alone. Momentum, age and chain count add small bounded multipliers. ' +
       'The residuals spread widely (standard deviation ' + c.residual_sd.toFixed(2) + ' in log terms), so every implied value is a rough central estimate, not a forecast.</p>' +
-      '<table><thead><tr><th>Category</th><th class="num">Factor</th><th class="num">Live peers</th><th class="num">Median residual</th></tr></thead><tbody>';
-    R.category_factors.forEach(function (cf) {
-      f += '<tr><td>' + esc(cf.category) + '</td><td class="num">&times;' + cf.factor.toFixed(3) +
-        '</td><td class="num">' + cf.peers + '</td><td class="num">' + (cf.median_residual >= 0 ? '+' : '') + cf.median_residual.toFixed(3) + '</td></tr>';
+      '<table><thead><tr><th>Category</th><th class="num">Live peers</th><th class="num">Median mcap / TVL</th><th class="num">Peers&rsquo; median TVL</th><th class="num">Weight</th></tr></thead><tbody>';
+    R.category_multiples.forEach(function (cm) {
+      f += '<tr><td>' + esc(cm.category) + '</td><td class="num">' + cm.peers + '</td><td class="num">&times;' + cm.median_multiple.toFixed(3) +
+        '</td><td class="num">' + money(cm.median_tvl_usd) + '</td><td class="num">' + cm.weight.toFixed(2) + '</td></tr>';
     });
     f += '</tbody></table>';
     return f;
