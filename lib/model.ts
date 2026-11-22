@@ -499,6 +499,16 @@ function gasToken(chain: string): string {
     Ripple: 'a little XRP', WEMIX: 'a little WEMIX', Qubic: 'a little QUBIC', Mixin: 'a little XIN',
     ZIGChain: 'a little ZIG', 'Bifrost Network': 'a little BNC', RSK: 'a little RBTC',
     Proton: 'a little XPR', Provenance: 'a little HASH', Canton: 'a little CC',
+    // Verified 2026-11-22: Arc pays gas in USDC (Circle's design, no separate fee token); Reya
+    // Network's chain currency is ETH (Camelot docs: gas on the Reya chain is paid in ETH);
+    // Tempo has no gas token at all — fees are paid in a USD stablecoin; Abstract is an
+    // Ethereum L2 whose gas is ETH. Pharos, Morph, Robinhood Chain and Strato stay generic:
+    // their gas tokens are genuinely ambiguous (PHRS testnet vs PROS mainnet claims for
+    // Pharos; ETH native vs BGB for Morph), so no ticker is asserted for them.
+    Arc: 'a little USDC', 'Reya Network': 'a little ETH', Tempo: 'a little of a USD stablecoin',
+    Abstract: 'a little ETH',
+    // Hive Protocol is a chain on BSquared (its snapshot chain), and BSquared's gas is BTC.
+    'Hive Protocol': 'a little BTC',
   };
   return map[chain] ?? 'enough of the chain’s native gas token';
 }
@@ -577,6 +587,43 @@ const PROFILES: [RegExp, FarmProfile][] = [
       caution: 'Redemption is the risk: confirm the window, the minimum and the fee before you deposit, and never assume an RWA redeems instantly.',
     },
   ],
+  // NOTE: these two sit above /lend/ — "Collateral Markets" is restaking collateral, not a
+  // borrow market (symbiotic got borrow/repay steps in radar-3), and "Uncollateralized
+  // Lending" has no collateral and no health factor (3jane-lending got both in radar-3).
+  [
+    /collateral markets/i,
+    {
+      core: [
+        'Deposit $${capital} of an accepted collateral asset, such as staked ETH, into {name} on {chain} and keep it delegated to an operator {name}’s own page lists',
+        'Put $${capital} of accepted collateral, such as staked ETH, to work through {name} on {chain}, delegated to an operator its own page lists',
+      ],
+      second: [
+        'Move a small part of the collateral to a second {name} vault or operator',
+        'Undelegate a small test amount and redelegate it to a different {name} operator',
+        'Check the rewards the {name} position earned and restake them',
+      ],
+      weekly: ['check the operator and vault status on {name}', 'check the rewards and the slashing terms on your {name} position', 'review the operators your {name} collateral is delegated to'],
+      watch: ['the {name} vault page for slashing conditions and operator changes', 'the {name} vault page for the operator set and the slashing terms'],
+      caution: 'Collateral can be slashed if an operator misbehaves: read the slashing terms and check the operator before you deposit, and never treat restaked collateral as liquid.',
+    },
+  ],
+  [
+    /uncollateralized/i,
+    {
+      core: [
+        'Supply $${capital} of USDC to {name}’s credit pool on {chain} and keep the position open',
+        'Lend $${capital} of USDC into {name}’s credit pool on {chain} and leave the supply position open',
+      ],
+      second: [
+        'Supply a second, smaller amount to a different {name} credit pool on {chain}',
+        'Withdraw a small test amount from the {name} pool to confirm the exit works, then supply it again',
+        'Check the interest the {name} pool paid and record it',
+      ],
+      weekly: ['check the pool’s utilization and the interest {name} pays', 'check the credit performance of the {name} pool', 'review the default history of the {name} pool'],
+      watch: ['the {name} pool page for defaults, utilization and the interest rate', 'the {name} pool page for the interest rate and any defaults'],
+      caution: 'Uncollateralized loans can default with nothing to seize: check the pool’s default history first, and never supply more than you can afford to lose.',
+    },
+  ],
   [
     /lend|collateral markets/i,
     {
@@ -609,6 +656,25 @@ const PROFILES: [RegExp, FarmProfile][] = [
       weekly: ['top up collateral or repay a little of the minted amount on {name}', 'check the peg of the stable asset {name} mints', 'adjust the collateral ratio on {name} if the market moved'],
       watch: ['the collateral ratio and the stable asset’s peg on {name}', 'the stability pool rate and the peg on {name}'],
       caution: 'Mint less than the maximum: a collateral ratio near the line is one price swing from liquidation.',
+    },
+  ],
+  // NOTE: /index/ must sit above /dex/ — "index" contains "dex", so the dex rule would
+  // otherwise swallow the Indexes category (set-protocol got DEX steps in radar-3).
+  [
+    /index/i,
+    {
+      core: [
+        'Buy $${capital} of the {name} index on {chain} and hold the index token in the wallet',
+        'Put $${capital} into the {name} index on {chain} and hold the index token',
+      ],
+      second: [
+        'Rebalance the index position once through {name}’s own page',
+        'Mint the {name} index with its underlying assets instead of buying it outright',
+        'Redeem a small part of the {name} index to test the exit',
+      ],
+      weekly: ['check the index composition {name} publishes', 'check the {name} index price against its underlying assets', 'review the rebalances {name} made this week'],
+      watch: ['the {name} index page for rebalances and fees', 'the {name} index page for the fee and the next rebalance'],
+      caution: 'An index is only as good as its composition: check what it holds and when it rebalances before you buy.',
     },
   ],
   [
@@ -710,7 +776,7 @@ const PROFILES: [RegExp, FarmProfile][] = [
       ],
       weekly: ['open and close one small hedged position on {name}', 'review the funding rate on your {name} position', 'close any {name} position you no longer want to hold'],
       watch: ['your margin, the funding rate and the liquidation price on {name}', 'the liquidation price and the funding rate on {name}'],
-      caution: 'Size the position so a sharp move cannot liquidate it: margin that can be wiped out in one candle is not farming.',
+      caution: 'Margin that can be wiped out in one candle is not farming: check the funding rate and the liquidation price every week, and close a position that drifts toward liquidation.',
     },
   ],
   [
@@ -816,23 +882,6 @@ const PROFILES: [RegExp, FarmProfile][] = [
     },
   ],
   [
-    /index/i,
-    {
-      core: [
-        'Buy $${capital} of the {name} index on {chain} and hold the index token in the wallet',
-        'Put $${capital} into the {name} index on {chain} and hold the index token',
-      ],
-      second: [
-        'Rebalance the index position once through {name}’s own page',
-        'Mint the {name} index with its underlying assets instead of buying it outright',
-        'Redeem a small part of the {name} index to test the exit',
-      ],
-      weekly: ['check the index composition {name} publishes', 'check the {name} index price against its underlying assets', 'review the rebalances {name} made this week'],
-      watch: ['the {name} index page for rebalances and fees', 'the {name} index page for the fee and the next rebalance'],
-      caution: 'An index is only as good as its composition: check what it holds and when it rebalances before you buy.',
-    },
-  ],
-  [
     /launchpad/i,
     {
       core: [
@@ -880,7 +929,7 @@ const PROFILES: [RegExp, FarmProfile][] = [
       ],
       weekly: ['check the vault return {name} reports', 'check the custodian report {name} publishes', 'review the withdrawal queue on {name}'],
       watch: ['the {name} vault page for the custodian, the strategy and withdrawal terms', 'the {name} vault page for withdrawal delays'],
-      caution: 'CeDeFi means a custodian holds the funds: read who it is and how withdrawals work before you deposit anything.',
+      caution: 'A custodian holds the funds, so a withdrawal freeze is a real risk: check the custodian’s track record and keep only what you can afford to wait for.',
     },
   ],
   [
@@ -988,7 +1037,10 @@ const HOLD_STEPS = [
  * an airdrop or any return.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
-  const chain = chainOf(p);
+  // A Chain-category protocol IS a chain: its snapshot chains[0] is the settlement chain it
+  // runs on (abstract lists Ethereum), not the chain the farmer uses, so the protocol's own
+  // name is the chain here (abstract's steps said "on Ethereum" in radar-3).
+  const chain = p.category === 'Chain' ? p.name : chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const profile = profileFor(p);

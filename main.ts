@@ -8,7 +8,7 @@
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, dashboard/
 // app.css and dashboard/app.js read /output/data.js, which this program writes from the same
-// board. The gate's shape is kept exactly: 200 rows, watchlist covered, ranks 1..N, implied
+// board. The gate's shape is kept exactly: 226 rows, watchlist covered, ranks 1..N, implied
 // values non-increasing, 6 farm steps a row, 3 screenshots, dossier from buildDossier.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
