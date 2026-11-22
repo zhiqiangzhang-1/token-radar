@@ -477,6 +477,17 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
+/**
+ * The destination a canonical bridge leads to, from the protocol's own name: the name minus a
+ * trailing "Bridge" ("PulseChain Bridge" -> "PulseChain", "SuiBridge" -> "Sui", "Polygon zkEVM
+ * Bridge" -> "Polygon zkEVM", "zkSync Era txBridge" -> "zkSync Era"). The snapshot's chains[0]
+ * is the chain the funds leave (Ethereum for every canonical bridge on the board), never the
+ * destination, so the name is the only in-snapshot signal for where the bridge goes.
+ */
+function destFor(p: SnapshotProtocol): string {
+  return p.name.replace(/ bridge$/i, '').replace(/bridge$/i, '').replace(/ tx$/i, '').replace(/ gateway$/i, '').trim();
+}
+
 /** The gas token of a chain, for the fee note in the first step; unknown chains stay generic. */
 function gasToken(chain: string): string {
   // A full phrase, so the sentence reads with or without a known ticker: "keep a little ETH
@@ -641,6 +652,27 @@ const PROFILES: [RegExp, FarmProfile][] = [
       caution: 'Watch the health factor every week: if it drifts toward liquidation, add collateral or repay before the market moves, not after.',
     },
   ],
+  // NOTE: this sits above /cdp|stablecoin/ — a stablecoin wrapper does not lock collateral,
+  // mint its own stable asset or run a liquidation line (saturn wraps USDat and stakes it for
+  // the yield-bearing sUSDat receipt), so the CDP steps (lock collateral, mint, watch the
+  // collateral ratio) are wrong for it.
+  [
+    /stablecoin wrapper/i,
+    {
+      core: [
+        'Swap $${capital} of USDC for the stablecoin {name} wraps on {chain} and stake it for the yield-bearing receipt token, after reading the backing report on its own page',
+        'Buy $${capital} of {name}’s stablecoin on {chain} with USDC and stake it for the receipt token it issues, once you have read the backing report on its own page',
+      ],
+      second: [
+        'Stake a second, smaller amount through {name} and hold the receipt token in the same wallet',
+        'Unstake a small test amount of the receipt token to confirm the exit works, then stake it again',
+        'Check the yield the {name} receipt token earned and record it',
+      ],
+      weekly: ['check the receipt token’s exchange rate and the yield {name} paid', 'check the backing report {name} publishes', 'review the yield rate on the receipt token {name} issues'],
+      watch: ['the receipt token’s exchange rate and {name}’s backing report', 'the backing report and the receipt token’s yield on {name}'],
+      caution: 'The receipt token only earns while the backing earns: check the backing report and the exchange rate before you add more, and never treat a wrapped stablecoin as the underlying dollar itself.',
+    },
+  ],
   [
     /cdp|stablecoin/i,
     {
@@ -745,8 +777,30 @@ const PROFILES: [RegExp, FarmProfile][] = [
       caution: 'The receipt token’s exchange rate is the position: if it slips against the staking asset, find out why before adding more.',
     },
   ],
+  // NOTE: this sits above the generic bridge rule — a canonical bridge runs one way, from the
+  // chain the snapshot names (Ethereum for every canonical bridge on the board) to the chain in
+  // the protocol's name, so "to {chain}" points the wrong way (PulseChain Bridge's steps said
+  // "to Ethereum" in radar-3). {dest} is the destination from the name; the generic rule stays
+  // for multi-chain bridges, where the snapshot gives no direction signal.
   [
-    /bridge|canonical bridge|cross chain/i,
+    /canonical bridge/i,
+    {
+      core: [
+        'Bridge $${capital} of USDC from {chain} to {dest} through {name} and use the bridged funds in an app on {dest}',
+        'Send $${capital} of USDC from {chain} to {dest} across {name} and put the bridged funds to work in an app on {dest}',
+      ],
+      second: [
+        'Bridge a smaller amount back from {dest} to {chain} through {name} so the wallet shows both directions',
+        'Bridge to {dest} a second time with a smaller amount and hold the funds there for a week',
+        'Use the bridged funds in a second app on {dest} before bridging any back through {name}',
+      ],
+      weekly: ['bridge a small amount from {chain} to {dest} through {name} and use it the same day', 'bridge a small amount through {name} to {dest}', 'check the bridge fee {name} charges this week'],
+      watch: ['the {name} page for fees and the time a transfer to {dest} takes', 'the {name} page for the fee and the transfer time to {dest}'],
+      caution: 'Bridges are the most phished surface in crypto: only use the link {name}’s own site publishes, and never bridge to an address you have not checked twice.',
+    },
+  ],
+  [
+    /bridge|cross chain/i,
     {
       core: [
         'Bridge $${capital} of USDC to {chain} through {name} and use the bridged funds in an app on the destination chain',
@@ -758,7 +812,7 @@ const PROFILES: [RegExp, FarmProfile][] = [
         'Use the bridged funds in a second app on {chain} before bridging any back through {name}',
       ],
       weekly: ['bridge a small amount through {name} to a chain you already use', 'bridge a small amount through {name} and use it the same day', 'check the bridge fee {name} charges this week'],
-      watch: ['the {name} bridge page for fees and the time a transfer takes', 'the {name} bridge page for the fee and the transfer time'],
+      watch: ['the {name} page for fees and the time a transfer takes', 'the {name} page for the fee and the transfer time'],
       caution: 'Bridges are the most phished surface in crypto: only use the link {name}’s own site publishes, and never bridge to an address you have not checked twice.',
     },
   ],
@@ -1001,6 +1055,7 @@ function fill(template: string, p: SnapshotProtocol, capital: number, chain: str
     .replaceAll('${capital}', String(capital))
     .replaceAll('{name}', p.name)
     .replaceAll('{chain}', chain)
+    .replaceAll('{dest}', destFor(p))
     .replaceAll('{slug}', p.slug)
     .replaceAll('{gas}', gasToken(chain))
     .replaceAll('{a}', articleFor(p.name));

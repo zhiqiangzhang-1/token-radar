@@ -164,7 +164,8 @@
       'Each category with at least three live peers then contributes its own median mcap/TVL, moved to the protocol&rsquo;s size along the curve ' +
       'and blended with the curve by sample size (weight n/(n+4)), the blend kept within 0.15&times;&ndash;3.0&times; of the curve; ' +
       'categories with fewer than three peers are priced by the curve alone. Momentum, age and chain count add small bounded multipliers. ' +
-      'The residuals spread widely (standard deviation ' + c.residual_sd.toFixed(2) + ' in log terms), so every implied value is a rough central estimate, not a forecast.</p>' +
+      'The residuals spread widely (standard deviation ' + c.residual_sd.toFixed(2) + ' in log terms), so every implied value is a rough central estimate, not a forecast. ' +
+      'A sensitivity check makes the point concrete: dropping the ten most extreme live tokens leaves 28 of the top 30 in place, while a mid-board rank can move by as much as 48 places.</p>' +
       '<table><thead><tr><th>Category</th><th class="num">Live peers</th><th class="num">Median mcap / TVL</th><th class="num">Peers&rsquo; median TVL</th><th class="num">Weight</th></tr></thead><tbody>';
     R.category_multiples.forEach(function (cm) {
       f += '<tr><td>' + esc(cm.category) + '</td><td class="num">' + cm.peers + '</td><td class="num">&times;' + cm.median_multiple.toFixed(3) +
