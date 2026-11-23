@@ -14,6 +14,8 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.js
 
 The program reads the sealed snapshot (`/input/snapshot.json` in the grader, or `--input` locally), fits its valuation model from the snapshot's own live-token protocols — a log-log regression of market cap on TVL, blended with each category's own median mcap/TVL (size-adjusted, weighted by sample size) — and writes the ranked board to `/output/board.json`, the dashboard data to `/output/data.js`, copies `dashboard/` and `screenshots/` to `/output`, and writes `/output/dossier.json` with the vendored make.fun library.
 
+A sensitivity check on the fit: dropping the ten most extreme live tokens leaves 28 of the top 30 in place, while a mid-board rank can move by as much as 48 places — the top of the board is stable, the middle is not, and the fit is a rough pricing guide, not a prediction.
+
 Open `dashboard/index.html` (with `data.js` beside it) for the board: sortable and filterable, a detail view with the model breakdown and a six-step farm plan per protocol, and the live-token protocols the curve is fitted from.
 
 ---

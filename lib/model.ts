@@ -478,14 +478,28 @@ function chainOf(p: SnapshotProtocol): string {
 }
 
 /**
- * The destination a canonical bridge leads to, from the protocol's own name: the name minus a
- * trailing "Bridge" ("PulseChain Bridge" -> "PulseChain", "SuiBridge" -> "Sui", "Polygon zkEVM
- * Bridge" -> "Polygon zkEVM", "zkSync Era txBridge" -> "zkSync Era"). The snapshot's chains[0]
- * is the chain the funds leave (Ethereum for every canonical bridge on the board), never the
- * destination, so the name is the only in-snapshot signal for where the bridge goes.
+ * The destination a bridge leads to. Canonical bridges take it from the protocol's own name
+ * (the snapshot's chains[0] is the chain the funds leave, never the destination). Generic
+ * bridges take chains[0] unless the direction is verified otherwise: Morph Bridge runs
+ * Ethereum -> Morph, Citrea Bridge moves assets into Citrea, TxFlow Bridge holds USDC on
+ * Arbitrum and credits TxFlow L1 (all verified 2026-11-22). Rows without an entry keep
+ * chains[0] (Pacifica/Echo/Endurance/Wan/Ring/Wrapped read as they stand today).
  */
 function destFor(p: SnapshotProtocol): string {
-  return p.name.replace(/ bridge$/i, '').replace(/bridge$/i, '').replace(/ tx$/i, '').replace(/ gateway$/i, '').trim();
+  if (/canonical bridge/i.test(p.category ?? '')) {
+    return p.name.replace(/ bridge$/i, '').replace(/bridge$/i, '').replace(/ tx$/i, '').replace(/ gateway$/i, '').trim();
+  }
+  const bridgeDest: Record<string, string> = {
+    'morph-bridge': 'Morph',
+    'citrea-bridge': 'Citrea',
+    'txflow-bridge': 'TxFlow',
+  };
+  return bridgeDest[p.slug] ?? chainOf(p);
+}
+
+/** The asset a generic bridge moves: BTC for Echo Bridge (it moves BTC assets into BSquared), USDC for the rest. */
+function bridgeAssetFor(p: SnapshotProtocol): string {
+  return p.slug === 'echo-bridge' ? 'BTC' : 'USDC';
 }
 
 /** The gas token of a chain, for the fee note in the first step; unknown chains stay generic. */
@@ -513,11 +527,16 @@ function gasToken(chain: string): string {
     // Verified 2026-11-22: Arc pays gas in USDC (Circle's design, no separate fee token); Reya
     // Network's chain currency is ETH (Camelot docs: gas on the Reya chain is paid in ETH);
     // Tempo has no gas token at all — fees are paid in a USD stablecoin; Abstract is an
-    // Ethereum L2 whose gas is ETH. Pharos, Morph, Robinhood Chain and Strato stay generic:
-    // their gas tokens are genuinely ambiguous (PHRS testnet vs PROS mainnet claims for
-    // Pharos; ETH native vs BGB for Morph), so no ticker is asserted for them.
+    // Ethereum L2 whose gas is ETH. Pharos mainnet is live (2026-04-28, chain ID 1672) and
+    // its gas token is PROS — the PHRS ticker was the testnet token. Robinhood Chain mainnet
+    // is live (2026-07-01, chain ID 4663), pays gas in ETH and has issued no native token
+    // (official docs). Strato's docs say every transaction today pays a flat 0.01 USDST;
+    // paying gas in $STRATO is the planned design, not today's behaviour. Morph stays
+    // generic: ETH-native and BGB-as-gas claims conflict (Bitget's Sep 2025 BGB move vs
+    // Morph's own docs/faucet still naming ETH), so no ticker is asserted for it.
     Arc: 'a little USDC', 'Reya Network': 'a little ETH', Tempo: 'a little of a USD stablecoin',
-    Abstract: 'a little ETH',
+    Abstract: 'a little ETH', Pharos: 'a little PROS', 'Robinhood Chain': 'a little ETH',
+    Strato: 'a little USDST',
     // Hive Protocol is a chain on BSquared (its snapshot chain), and BSquared's gas is BTC.
     'Hive Protocol': 'a little BTC',
   };
@@ -791,7 +810,7 @@ const PROFILES: [RegExp, FarmProfile][] = [
       ],
       second: [
         'Bridge a smaller amount back from {dest} to {chain} through {name} so the wallet shows both directions',
-        'Bridge to {dest} a second time with a smaller amount and hold the funds there for a week',
+        'Bridge to {dest} a second time through {name} with a smaller amount and hold the funds there for a week',
         'Use the bridged funds in a second app on {dest} before bridging any back through {name}',
       ],
       weekly: ['bridge a small amount from {chain} to {dest} through {name} and use it the same day', 'bridge a small amount through {name} to {dest}', 'check the bridge fee {name} charges this week'],
@@ -799,17 +818,41 @@ const PROFILES: [RegExp, FarmProfile][] = [
       caution: 'Bridges are the most phished surface in crypto: only use the link {name}’s own site publishes, and never bridge to an address you have not checked twice.',
     },
   ],
+  // NOTE: this sits above the generic bridge rule — wTAO, tzBTC and cirBTC are wrapped
+  // assets, not bridges: the user locks the underlying asset and receives a wrapped token
+  // (TAO locked on Bittensor -> wTAO on Ethereum, BTC with tzBTC Keyholders -> tzBTC on
+  // Tezos, BTC with Circle Mint -> cirBTC on Ethereum), so "bridge USDC to Bitcoin" is
+  // wrong for all three (verified 2026-11-22). Routed here by the slug override below;
+  // {chain} is deliberately unused — it names the backing chain, not where the wrapped
+  // token lives.
+  [
+    /wrapped asset/i,
+    {
+      core: [
+        'Wrap $${capital} of the underlying asset into {name} through its own mint page, after reading who holds the backing and how redemption works',
+        'Mint $${capital} of {name} against the underlying asset through its own mint page, once you have read the backing and the redemption terms',
+      ],
+      second: [
+        'Redeem a small test amount of {name} back to the underlying asset to confirm the redemption path works',
+        'Hold the {name} wrapped token for a week and check its peg against the underlying asset',
+        'Use the wrapped token in one app that accepts {name}, then return it to the wallet',
+      ],
+      weekly: ['check the peg of {name} against the underlying asset', 'check the backing report {name} publishes', 'review the custodian and the redemption terms on {name}'],
+      watch: ['the {name} page for the peg, the backing report and redemption terms', 'the backing report and the peg on {name}'],
+      caution: 'A wrapped token is only as good as its backing and its custodian: check who holds the underlying asset and how redemption works before you mint, and never treat the wrapped token as the asset itself.',
+    },
+  ],
   [
     /bridge|cross chain/i,
     {
       core: [
-        'Bridge $${capital} of USDC to {chain} through {name} and use the bridged funds in an app on the destination chain',
-        'Send $${capital} of USDC across {name} to {chain} and put the bridged funds to work in an app on that chain',
+        'Bridge $${capital} of {asset} to {dest} through {name} and use the bridged funds in an app on {dest}',
+        'Send $${capital} of {asset} across {name} to {dest} and put the bridged funds to work in an app on {dest}',
       ],
       second: [
         'Bridge a smaller amount back through {name} so the wallet shows both directions',
         'Bridge to a second destination chain {name} supports and hold the funds there for a week',
-        'Use the bridged funds in a second app on {chain} before bridging any back through {name}',
+        'Use the bridged funds in a second app on {dest} before bridging any back through {name}',
       ],
       weekly: ['bridge a small amount through {name} to a chain you already use', 'bridge a small amount through {name} and use it the same day', 'check the bridge fee {name} charges this week'],
       watch: ['the {name} page for fees and the time a transfer takes', 'the {name} page for the fee and the transfer time'],
@@ -916,6 +959,28 @@ const PROFILES: [RegExp, FarmProfile][] = [
       weekly: ['settle or close one position on {name}', 'check the resolution rules on your open {name} markets', 'close one {name} position this week'],
       watch: ['your open positions on {name} and the market’s resolution rules', 'the {name} market page for resolution dates and rules'],
       caution: 'A prediction market pays on its written resolution rules, not on what happened in the world: read them before you place anything.',
+    },
+  ],
+  // NOTE: this sits above /governance/ — chain-governance staking is delegation, not voting
+  // on proposals: delegators stake the chain's asset with a validator (Chiliz: min 0.01 CHZ,
+  // validators vote on proposals with delegated weight, rewards are inflation-funded), so
+  // the generic governance steps (vote on a proposal, join a discussion) are wrong for it.
+  // Routed here by the slug override below.
+  [
+    /governance staking/i,
+    {
+      core: [
+        'Delegate $${capital} of {chain}’s staking asset to a validator {name} lists, after reading the validator’s commission and uptime',
+        'Stake $${capital} through {name} on {chain}, delegated to a validator with a published commission and uptime record',
+      ],
+      second: [
+        'Delegate a smaller amount to a second {name} validator',
+        'Claim the staking rewards {name} paid and restake them',
+        'Move a small part of the {name} delegation to a validator with a lower commission',
+      ],
+      weekly: ['check the staking rewards {name} paid', 'check the validator your {name} delegation sits with is still active', 'review the commission and uptime of your {name} validator'],
+      watch: ['the {name} staking page for validator commission, uptime and the unbonding delay', 'the {name} validator list for commission changes and inactive validators'],
+      caution: 'Delegated stake earns only while the validator stays honest and online: check the commission and the unbonding delay before you delegate, and never delegate to a validator you have not checked.',
     },
   ],
   [
@@ -1037,8 +1102,23 @@ const DEFAULT_PROFILE: FarmProfile = {
   caution: 'Read the protocol’s own page before every new action: a product you have not read is a risk you have not priced.',
 };
 
+/**
+ * Steps-only category overrides, for rows whose snapshot category misdescribes the product.
+ * The valuation model keeps the snapshot category — only the farm-steps profile changes.
+ * Verified 2026-11-22: chiliz-governance-staking is a CHZ delegation product on Chiliz Chain,
+ * not a chain; wtao/tzbtc/circle-bitcoin are wrapped assets, not bridges; obeliskbtc is a BTC
+ * restaking/asset-management protocol (its mechanism details are unpublished), not a bridge.
+ */
+const STEPS_CATEGORY: Record<string, string> = {
+  'chiliz-governance-staking': 'Governance Staking',
+  wtao: 'Wrapped Asset',
+  tzbtc: 'Wrapped Asset',
+  'circle-bitcoin': 'Wrapped Asset',
+  obeliskbtc: 'Restaking',
+};
+
 function profileFor(p: SnapshotProtocol): FarmProfile {
-  const c = p.category ?? '';
+  const c = STEPS_CATEGORY[p.slug] ?? p.category ?? '';
   for (const [re, profile] of PROFILES) {
     if (re.test(c)) return profile;
   }
@@ -1056,6 +1136,7 @@ function fill(template: string, p: SnapshotProtocol, capital: number, chain: str
     .replaceAll('{name}', p.name)
     .replaceAll('{chain}', chain)
     .replaceAll('{dest}', destFor(p))
+    .replaceAll('{asset}', bridgeAssetFor(p))
     .replaceAll('{slug}', p.slug)
     .replaceAll('{gas}', gasToken(chain))
     .replaceAll('{a}', articleFor(p.name));
@@ -1094,8 +1175,11 @@ const HOLD_STEPS = [
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   // A Chain-category protocol IS a chain: its snapshot chains[0] is the settlement chain it
   // runs on (abstract lists Ethereum), not the chain the farmer uses, so the protocol's own
-  // name is the chain here (abstract's steps said "on Ethereum" in radar-3).
-  const chain = p.category === 'Chain' ? p.name : chainOf(p);
+  // name is the chain here (abstract's steps said "on Ethereum" in radar-3). A row whose
+  // steps category is overridden (chiliz-governance-staking) is not a chain, so it uses the
+  // snapshot chain instead.
+  const stepsCategory = STEPS_CATEGORY[p.slug] ?? p.category;
+  const chain = stepsCategory === 'Chain' ? p.name : chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const profile = profileFor(p);
