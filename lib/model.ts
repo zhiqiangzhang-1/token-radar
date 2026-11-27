@@ -531,12 +531,14 @@ function gasToken(chain: string): string {
     // its gas token is PROS — the PHRS ticker was the testnet token. Robinhood Chain mainnet
     // is live (2026-07-01, chain ID 4663), pays gas in ETH and has issued no native token
     // (official docs). Strato's docs say every transaction today pays a flat 0.01 USDST;
-    // paying gas in $STRATO is the planned design, not today's behaviour. Morph stays
-    // generic: ETH-native and BGB-as-gas claims conflict (Bitget's Sep 2025 BGB move vs
-    // Morph's own docs/faucet still naming ETH), so no ticker is asserted for it.
+    // paying gas in $STRATO is the planned design, not today's behaviour. Morph's gas is
+    // BGB, resolved 2026-11-25: Morph's own blog ("BGB Becomes Morph Native Token") states
+    // BGB powers all gas, governance and settlement on the chain, and the Nov 2025 Bitget
+    // integration finalised it (The Block, CoinSpeaker) — the earlier ETH wording was the
+    // pre-Sep-2025 state, before the 440M BGB transfer to the Morph Foundation.
     Arc: 'a little USDC', 'Reya Network': 'a little ETH', Tempo: 'a little of a USD stablecoin',
     Abstract: 'a little ETH', Pharos: 'a little PROS', 'Robinhood Chain': 'a little ETH',
-    Strato: 'a little USDST',
+    Strato: 'a little USDST', Morph: 'a little BGB',
     // Hive Protocol is a chain on BSquared (its snapshot chain), and BSquared's gas is BTC.
     'Hive Protocol': 'a little BTC',
   };

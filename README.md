@@ -16,7 +16,7 @@ The program reads the sealed snapshot (`/input/snapshot.json` in the grader, or 
 
 A sensitivity check on the fit: dropping the ten most extreme live tokens leaves 28 of the top 30 in place, while a mid-board rank can move by as much as 48 places — the top of the board is stable, the middle is not, and the fit is a rough pricing guide, not a prediction.
 
-Open `dashboard/index.html` (with `data.js` beside it) for the board: sortable and filterable, a detail view with the model breakdown and a six-step farm plan per protocol, and the live-token protocols the curve is fitted from.
+Open `dashboard/index.html` (with `data.js` beside it) for the board: sortable and filterable, a detail view with the model breakdown and a six-step farm plan per protocol, and the 24 largest live-token protocols the curve is fitted from.
 
 ---
 
